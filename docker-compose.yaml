@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: db
+
+  poc:
+    container_name: poc
+    build: .
+    volumes:
+      - ./:/poc
+    ports:
+      - 3000:3000
+    depends_on:
+      - db
