@@ -2,6 +2,8 @@
 
 poc for testing a zero-knowledge group-based asset system for tgf
 
+horribly slow/unoptimized for the sake of simplicity. NOT reference implementation
+
 - users can login/be created
 - users can create items
 - users in groups can see all items in the group
