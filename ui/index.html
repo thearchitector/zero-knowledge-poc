@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Basic Forms</title>
     <style>
-      /* Style for hiding the main content until login is completed */
       #mainContent {
         display: none;
       }
@@ -25,8 +24,11 @@
     </style>
     <script src="nacl-fast.min.js"></script>
     <script>
-      // Generate a key pair from a seed
       async function generateKeyPair(password, salt) {
+        /**
+         * generate a user's key pair from their password and a salt. both are
+         * deterministic. the salt ensures uniqueness if passwords match between users
+         **/
         const enc = new TextEncoder();
         const keyMaterial = await window.crypto.subtle.importKey(
           "raw",
@@ -48,16 +50,26 @@
         return nacl.box.keyPair.fromSecretKey(new Uint8Array(secretBits));
       }
 
-      function serializeKey(key) {
+      function serializeBytes(key) {
+        /**
+         * convert raw data to base 64 string
+         **/
         return btoa(String.fromCharCode(...new Uint8Array(key)));
       }
 
-      function deserializeKey(serializedKey) {
+      function deserializeBytes(serializedKey) {
+        /**
+         * convert base 64 string to raw data
+         **/
         return Uint8Array.from(atob(serializedKey), (char) => char.charCodeAt(0));
       }
 
-      // Function to handle login/account creation
       async function handleLogin(event) {
+        /**
+         * NOT how we would handle user login/creation in prod. if user exists, we're
+         * good. if the user doesn't exist, create it and then create their personal
+         * group.
+         **/
         event.preventDefault(); // Prevent form submission
         const email = document.getElementById("loginEmail").value;
         const password = document.getElementById("loginPassword").value;
@@ -84,7 +96,7 @@
             } else if (response.status === 403) {
               // User does not exist, create a new user
               keyPair = await generateKeyPair(password, email);
-              const publicKeyBase64 = serializeKey(keyPair.publicKey);
+              const publicKeyBase64 = serializeBytes(keyPair.publicKey);
 
               // Send a POST request to create the user
               const formData = new FormData();
@@ -123,8 +135,8 @@
       }
 
       function displayCredentials(email, userId, keyPair) {
-        const privateKeyBase64 = serializeKey(keyPair.secretKey);
-        const publicKeyBase64 = serializeKey(keyPair.publicKey);
+        const privateKeyBase64 = serializeBytes(keyPair.secretKey);
+        const publicKeyBase64 = serializeBytes(keyPair.publicKey);
 
         document.getElementById("credentials").innerText =
           "email: " +
@@ -161,14 +173,15 @@
         const formData = new FormData();
         formData.append("host_user_id", window.userId);
         formData.append("name", name);
-        formData.append("encryption_key", serializeKey(encryptedSymmetricKey));
-        formData.append("encryption_key_nonce", serializeKey(encryptionKeyNonce));
+        formData.append("encryption_key", serializeBytes(encryptedSymmetricKey));
+        formData.append("encryption_key_nonce", serializeBytes(encryptionKeyNonce));
         await sendFormData("/create_group", formData);
       }
     </script>
     <script>
       async function createSymmetricKey() {
-        // Generate a symmetric encryption key
+        // Generate a symmetric encryption key. the algorithm here doesn't really matter
+        // as long as its symmetric can be done in browser
         const symmetricKey = await crypto.subtle.generateKey(
           { name: "AES-GCM", length: 256 },
           true,
@@ -225,6 +238,7 @@
 
       async function fetchAndMakeItem(item) {
         try {
+          // stream the encrypted content from the server
           const response = await fetch(`/view_item?item_id=${item.id}`);
           const chunks = [];
           for await (const chunk of response.body) {
@@ -265,9 +279,13 @@
     </script>
     <script>
       async function decryptGroupKey(grouping) {
+        /**
+         * decrypt the group's key using the user's private key and the encrypted
+         * key available on their grouping
+         **/
         const rawKey = nacl.box.open(
-          deserializeKey(grouping.encryption_key),
-          deserializeKey(grouping.encryption_key_nonce),
+          deserializeBytes(grouping.encryption_key),
+          deserializeBytes(grouping.encryption_key_nonce),
           window.encryptionKeyPair.publicKey,
           window.encryptionKeyPair.secretKey
         );
@@ -287,19 +305,29 @@
       }
 
       async function encryptFileAndSubmit() {
+        /**
+         * encrypt the file contents using a new symmetric key. send the encrypted file
+         * to the BE, as well as the symmetric key _after_ it has been encrypted with
+         * symmetric key of the owning user's group.
+         **/
         const fileInput = document.getElementById("itemFile");
         if (fileInput.files.length === 0) {
           alert("Please choose a file.");
           return;
         }
 
+        // decrypt the private group key from the grouping using the user's priv key.
+        // assuming here that the first grouping returned is the one associated with
+        // their private group
         const groupPrivateKey = await decryptGroupKey(
           window.groupMemberships[0].grouping
         );
         console.log("group", groupPrivateKey);
+        // generate a new symmetric content encryption key
         const { symmetricKey, exportedSymmetricKey } = await createSymmetricKey();
         console.log("key", symmetricKey);
 
+        // encrypt the content encryption key using the user's group's private key
         const keyEncryptionNonce = nacl.randomBytes(12);
         console.log("key nonce", keyEncryptionNonce);
         const encryptedSymmetricKey = await crypto.subtle.encrypt(
@@ -324,9 +352,9 @@
         // Prepare the FormData payload
         const formData = new FormData();
         formData.append("owner_user_id", window.userId);
-        formData.append("encryption_key", serializeKey(encryptedSymmetricKey));
-        formData.append("encryption_key_nonce", serializeKey(keyEncryptionNonce));
-        formData.append("content_nonce", serializeKey(contentNonce));
+        formData.append("encryption_key", serializeBytes(encryptedSymmetricKey));
+        formData.append("encryption_key_nonce", serializeBytes(keyEncryptionNonce));
+        formData.append("content_nonce", serializeBytes(contentNonce));
         formData.append(
           "content",
           new Blob([encryptedFileContent], { type: "application/octet-stream" })
@@ -368,12 +396,17 @@
 
         if (selectedGroup != -2) {
           const itemsGrid = document.getElementById("itemsGrid");
+          // for every item, attempt to decrypt it using the selected grouping->sharing
+          // chain. if the grouping is incorrect, or the sharing doesn't exist, the item
+          // cannot be viewed
           for (const item of itemsGrid.children) {
             const img = item.children[0];
+            // fetch the raw content again
             const rawResp = await fetch(img.dataset.raw);
             const buffer = await rawResp.arrayBuffer();
             const encryptedFileContent = new Uint8Array(buffer);
 
+            // attempt to decrypt the file
             const fileContent = await decryptFile(
               encryptedFileContent,
               img.dataset.nonce,
@@ -384,6 +417,7 @@
               console.log("no access");
               continue;
             }
+            // if we did decrypt it, replace the img src
             const blob = new Blob([fileContent], { type: "application/octet-stream" });
             const objectUrl = URL.createObjectURL(blob);
             img.src = objectUrl;
@@ -393,6 +427,10 @@
       }
 
       async function decryptFile(encryptedFileContent, contentNonce, grouping, itemId) {
+        /**
+         * decrypts the provided file content using the stored nonce, grouping, and item
+         * id.
+         **/
         const sharingResponse = await fetch(
           `/get_sharing?group_id=${grouping.group_id}&item_id=${itemId}`
         );
@@ -402,7 +440,7 @@
         console.log("group", groupPrivateKey);
         const itemKey = await decryptItemKey(sharing, groupPrivateKey);
         const fileContent = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: deserializeKey(contentNonce) },
+          { name: "AES-GCM", iv: deserializeBytes(contentNonce) },
           itemKey,
           encryptedFileContent
         );
@@ -410,12 +448,15 @@
       }
 
       async function decryptItemKey(sharing, groupPrivateKey) {
-        console.log("key nonce", deserializeKey(sharing.encryption_key_nonce));
-        console.log("key enc", deserializeKey(sharing.encryption_key));
+        /**
+         * decrypt the item's private key using the group's key
+         **/
+        console.log("key nonce", deserializeBytes(sharing.encryption_key_nonce));
+        console.log("key enc", deserializeBytes(sharing.encryption_key));
         const rawKey = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: deserializeKey(sharing.encryption_key_nonce) },
+          { name: "AES-GCM", iv: deserializeBytes(sharing.encryption_key_nonce) },
           groupPrivateKey,
-          deserializeKey(sharing.encryption_key)
+          deserializeBytes(sharing.encryption_key)
         );
 
         const itemPrivateKey = await crypto.subtle.importKey(
