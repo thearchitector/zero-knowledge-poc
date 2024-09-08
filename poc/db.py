@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 from functools import cache
+from typing import Annotated
 
 import asyncio_atexit
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 DB_URL = "postgresql+asyncpg://user:pass@db:5432/db"
 
@@ -26,9 +28,11 @@ def create_sessionmaker(db_url, autoflush=True, expire_on_commit=True, **kwargs)
     )
 
 
-@asynccontextmanager
 async def create_session():
     session_maker = create_sessionmaker(DB_URL)
 
     async with session_maker() as session:
         yield session
+
+
+SessionDependency = Annotated[AsyncSession, Depends(create_session)]

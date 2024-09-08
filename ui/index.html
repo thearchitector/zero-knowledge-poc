@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Basic Forms</title>
+    <style>
+      /* Style for hiding the main content until login is completed */
+      #mainContent {
+        display: none;
+      }
+
+      #itemsGrid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px;
+        justify-content: center;
+        margin-top: 20px;
+      }
+
+      img {
+        max-width: 200px;
+        max-height: 200px;
+      }
+    </style>
+    <script src="nacl-fast.min.js"></script>
+    <script>
+      // Generate a key pair from a seed
+      async function generateKeyPair(password, salt) {
+        const enc = new TextEncoder();
+        const keyMaterial = await window.crypto.subtle.importKey(
+          "raw",
+          enc.encode(password),
+          "PBKDF2",
+          false,
+          ["deriveBits"]
+        );
+        const secretBits = await window.crypto.subtle.deriveBits(
+          {
+            name: "PBKDF2",
+            hash: "SHA-256",
+            salt: enc.encode(salt),
+            iterations: 100000,
+          },
+          keyMaterial,
+          256
+        );
+        return nacl.box.keyPair.fromSecretKey(new Uint8Array(secretBits));
+      }
+
+      function serializeKey(key) {
+        return btoa(String.fromCharCode(...new Uint8Array(key)));
+      }
+
+      function deserializeKey(serializedKey) {
+        return Uint8Array.from(atob(serializedKey), (char) => char.charCodeAt(0));
+      }
+
+      // Function to handle login/account creation
+      async function handleLogin(event) {
+        event.preventDefault(); // Prevent form submission
+        const email = document.getElementById("loginEmail").value;
+        const password = document.getElementById("loginPassword").value;
+
+        if (email && password) {
+          // Send a fetch call to /get_user to check if the user exists
+          try {
+            const response = await fetch(
+              `/get_user?email=${encodeURIComponent(email)}`
+            );
+
+            let userId;
+            let keyPair;
+
+            if (response.status === 200) {
+              // User exists, extract the user_id and generate the key pair
+              const data = await response.json();
+              userId = data.id;
+              keyPair = await generateKeyPair(password, email);
+
+              // Set window properties
+              window.userId = userId;
+              window.encryptionKeyPair = keyPair;
+            } else if (response.status === 403) {
+              // User does not exist, create a new user
+              keyPair = await generateKeyPair(password, email);
+              const publicKeyBase64 = serializeKey(keyPair.publicKey);
+
+              // Send a POST request to create the user
+              const formData = new FormData();
+              formData.append("email", email);
+              formData.append("encryption_key", publicKeyBase64);
+              const createResponse = await sendFormData("/create_user", formData);
+
+              if (createResponse.status === 200) {
+                const data = await createResponse.json();
+                userId = data.id;
+
+                // Set window properties
+                window.userId = userId;
+                window.encryptionKeyPair = keyPair;
+
+                await createGroup(`user ${window.userId}'s group`);
+              } else {
+                alert("Failed to create user. Please try again.");
+              }
+            } else {
+              alert("Unexpected response from the server.");
+              return;
+            }
+
+            // Show the main content
+            await fetchAndDisplayItems();
+            await fetchMemberships();
+            displayCredentials(email, userId, keyPair);
+          } catch (error) {
+            console.error("Error during login:", error);
+            alert("An error occurred. Please try again.");
+          }
+        } else {
+          alert("Please enter both Email and Password.");
+        }
+      }
+
+      function displayCredentials(email, userId, keyPair) {
+        const privateKeyBase64 = serializeKey(keyPair.secretKey);
+        const publicKeyBase64 = serializeKey(keyPair.publicKey);
+
+        document.getElementById("credentials").innerText =
+          "email: " +
+          email +
+          "\n" +
+          "user_id: " +
+          userId +
+          "\n" +
+          "private_encryption_key: " +
+          privateKeyBase64 +
+          "\n" +
+          "public_encryption_key: " +
+          publicKeyBase64;
+        document.getElementById("loginForm").style.display = "none";
+        document.getElementById("mainContent").style.display = "block";
+      }
+    </script>
+    <script>
+      async function createGroup(name) {
+        // create private group & grouping encrypted using user's key
+        const { symmetricKey, exportedSymmetricKey } = await createSymmetricKey();
+
+        // Generate a nonce for encrypting the symmetric key using TweetNaCl
+        const encryptionKeyNonce = nacl.randomBytes(24);
+        // Encrypt the symmetric key using the encryptionKeyPair and the
+        // generated nonce
+        const encryptedSymmetricKey = nacl.box(
+          new Uint8Array(exportedSymmetricKey),
+          encryptionKeyNonce,
+          window.encryptionKeyPair.publicKey,
+          window.encryptionKeyPair.secretKey
+        );
+
+        const formData = new FormData();
+        formData.append("host_user_id", window.userId);
+        formData.append("name", name);
+        formData.append("encryption_key", serializeKey(encryptedSymmetricKey));
+        formData.append("encryption_key_nonce", serializeKey(encryptionKeyNonce));
+        await sendFormData("/create_group", formData);
+      }
+    </script>
+    <script>
+      async function createSymmetricKey() {
+        // Generate a symmetric encryption key
+        const symmetricKey = await crypto.subtle.generateKey(
+          { name: "AES-GCM", length: 256 },
+          true,
+          ["encrypt", "decrypt"]
+        );
+        const exportedSymmetricKey = await crypto.subtle.exportKey("raw", symmetricKey);
+        return {
+          symmetricKey: symmetricKey,
+          exportedSymmetricKey: exportedSymmetricKey,
+        };
+      }
+
+      async function sendFormData(url, formData) {
+        try {
+          // Send the FormData to the server using async/await
+          const response = await fetch(url, {
+            method: "POST",
+            body: formData,
+          });
+
+          if (!response.ok) {
+            throw new Error(`${url} HTTP error! status: ${response.status}`);
+          }
+
+          alert(`${url} success!`);
+          return response;
+        } catch (error) {
+          console.error(`${url} error:`, error);
+          alert(`${url} error.`);
+        }
+      }
+    </script>
+    <script>
+      async function fetchAndDisplayItems() {
+        try {
+          const response = await fetch(`/get_items`);
+          if (response.ok) {
+            const items = await response.json(); // Get list of item IDs (integers)
+
+            // Create an array of promises for fetching each item concurrently
+            const fetchPromises = items.map((item) => fetchAndMakeItem(item));
+
+            // Wait for all fetchAndMakeItem promises to resolve
+            const divs = await Promise.all(fetchPromises);
+            const itemsGrid = document.getElementById("itemsGrid");
+            itemsGrid.replaceChildren(...divs);
+          } else {
+            console.error("Failed to fetch items.");
+          }
+        } catch (error) {
+          console.error("Error fetching items:", error);
+        }
+      }
+
+      async function fetchAndMakeItem(item) {
+        try {
+          const response = await fetch(`/view_item?item_id=${item.id}`);
+          const chunks = [];
+          for await (const chunk of response.body) {
+            chunks.push(chunk);
+          }
+
+          const blob = new Blob(chunks, { type: "application/octet-stream" }); // Combine chunks into a single Blob
+          const objectUrl = URL.createObjectURL(blob);
+
+          return makeImage(objectUrl, item); // Display the image or fallback
+        } catch (error) {
+          console.error("Error fetching item:", error);
+        }
+      }
+
+      function makeImage(imageUrl, item) {
+        const itemDiv = document.createElement("div");
+        itemDiv.className = "item";
+
+        // Create the img tag with an onerror fallback to a gray box
+        const imgElement = document.createElement("img");
+        imgElement.src = imageUrl;
+        imgElement.dataset.raw = imageUrl;
+        imgElement.dataset.itemId = item.id;
+        imgElement.dataset.nonce = item.content_nonce;
+        imgElement.onerror = function () {
+          this.onerror = null;
+          this.src =
+            "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgdmlld0JveD0iMCAwIDIwMCAyMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjIwMCIgaGVpZ2h0PSIyMDAiIGZpbGw9IiM5OTk5OTkiLz48L3N2Zz4=";
+        };
+        // imgElement.onload = () => {
+        //   URL.revokeObjectURL(imageUrl);
+        // };
+
+        itemDiv.appendChild(imgElement);
+        return itemDiv;
+      }
+    </script>
+    <script>
+      async function decryptGroupKey(grouping) {
+        const rawKey = nacl.box.open(
+          deserializeKey(grouping.encryption_key),
+          deserializeKey(grouping.encryption_key_nonce),
+          window.encryptionKeyPair.publicKey,
+          window.encryptionKeyPair.secretKey
+        );
+
+        const groupPrivateKey = await crypto.subtle.importKey(
+          "raw",
+          rawKey,
+          {
+            name: "AES-GCM",
+            length: 256,
+          },
+          true,
+          ["encrypt", "decrypt"]
+        );
+
+        return groupPrivateKey;
+      }
+
+      async function encryptFileAndSubmit() {
+        const fileInput = document.getElementById("itemFile");
+        if (fileInput.files.length === 0) {
+          alert("Please choose a file.");
+          return;
+        }
+
+        const groupPrivateKey = await decryptGroupKey(
+          window.groupMemberships[0].grouping
+        );
+        console.log("group", groupPrivateKey);
+        const { symmetricKey, exportedSymmetricKey } = await createSymmetricKey();
+        console.log("key", symmetricKey);
+
+        const keyEncryptionNonce = nacl.randomBytes(12);
+        console.log("key nonce", keyEncryptionNonce);
+        const encryptedSymmetricKey = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv: keyEncryptionNonce },
+          groupPrivateKey,
+          exportedSymmetricKey
+        );
+        console.log("key enc", encryptedSymmetricKey);
+
+        const file = fileInput.files[0];
+        const fileArrayBuffer = await file.arrayBuffer();
+
+        // Generate a nonce (IV) for AES-GCM using TweetNaCl
+        const contentNonce = nacl.randomBytes(12); // 12-byte nonce for AES-GCM
+        // Encrypt the file content using the symmetric key and the generated nonce
+        const encryptedFileContent = await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv: contentNonce },
+          symmetricKey,
+          fileArrayBuffer
+        );
+
+        // Prepare the FormData payload
+        const formData = new FormData();
+        formData.append("owner_user_id", window.userId);
+        formData.append("encryption_key", serializeKey(encryptedSymmetricKey));
+        formData.append("encryption_key_nonce", serializeKey(keyEncryptionNonce));
+        formData.append("content_nonce", serializeKey(contentNonce));
+        formData.append(
+          "content",
+          new Blob([encryptedFileContent], { type: "application/octet-stream" })
+        );
+        await sendFormData("/create_item", formData);
+        await fetchAndDisplayItems();
+      }
+    </script>
+    <script>
+      async function fetchMemberships(data) {
+        try {
+          const response = await fetch(`/get_memberships?user_id=${window.userId}`);
+          if (response.ok) {
+            const memberships = await response.json();
+            populateGroupDropdown(memberships);
+          } else {
+            console.error("Failed to fetch memberships.");
+          }
+        } catch (error) {
+          console.error("Error fetching memberships:", error);
+        }
+      }
+
+      function populateGroupDropdown(memberships) {
+        const dropdown = document.getElementById("groupDropdown");
+
+        window.groupMemberships = memberships;
+        memberships.forEach((membership, index) => {
+          const option = document.createElement("option");
+          option.value = index;
+          option.text = membership.group.name;
+          dropdown.add(option);
+        });
+      }
+
+      async function handleGroupSelectionChange() {
+        const dropdown = document.getElementById("groupDropdown");
+        const selectedGroup = parseInt(dropdown.value);
+
+        if (selectedGroup != -2) {
+          const itemsGrid = document.getElementById("itemsGrid");
+          for (const item of itemsGrid.children) {
+            const img = item.children[0];
+            const rawResp = await fetch(img.dataset.raw);
+            const buffer = await rawResp.arrayBuffer();
+            const encryptedFileContent = new Uint8Array(buffer);
+
+            const fileContent = await decryptFile(
+              encryptedFileContent,
+              img.dataset.nonce,
+              window.groupMemberships[selectedGroup].grouping,
+              parseInt(img.dataset.itemId)
+            );
+            if (fileContent === null) {
+              console.log("no access");
+              continue;
+            }
+            const blob = new Blob([fileContent], { type: "application/octet-stream" });
+            const objectUrl = URL.createObjectURL(blob);
+            img.src = objectUrl;
+            img.onload = () => URL.revokeObjectURL(objectUrl);
+          }
+        }
+      }
+
+      async function decryptFile(encryptedFileContent, contentNonce, grouping, itemId) {
+        const sharingResponse = await fetch(
+          `/get_sharing?group_id=${grouping.group_id}&item_id=${itemId}`
+        );
+        if (sharingResponse.status != 200) return null;
+        const sharing = await sharingResponse.json();
+        const groupPrivateKey = await decryptGroupKey(grouping);
+        console.log("group", groupPrivateKey);
+        const itemKey = await decryptItemKey(sharing, groupPrivateKey);
+        const fileContent = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: deserializeKey(contentNonce) },
+          itemKey,
+          encryptedFileContent
+        );
+        return fileContent;
+      }
+
+      async function decryptItemKey(sharing, groupPrivateKey) {
+        console.log("key nonce", deserializeKey(sharing.encryption_key_nonce));
+        console.log("key enc", deserializeKey(sharing.encryption_key));
+        const rawKey = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: deserializeKey(sharing.encryption_key_nonce) },
+          groupPrivateKey,
+          deserializeKey(sharing.encryption_key)
+        );
+
+        const itemPrivateKey = await crypto.subtle.importKey(
+          "raw",
+          rawKey,
+          {
+            name: "AES-GCM",
+            length: 256,
+          },
+          true,
+          ["encrypt", "decrypt"]
+        );
+        console.log("key", itemPrivateKey);
+        return itemPrivateKey;
+      }
+    </script>
+  </head>
+  <body>
+    <!-- Login/Account Creation Form -->
+    <div id="loginForm">
+      <h2>Login or Create an Account</h2>
+      <form onsubmit="handleLogin(event)">
+        <label for="loginEmail">Email:</label>
+        <input type="email" id="loginEmail" required />
+        <br /><br />
+        <label for="loginPassword">Password:</label>
+        <input type="password" id="loginPassword" required />
+        <br /><br />
+        <button type="submit">Login / Create Account</button>
+      </form>
+    </div>
+
+    <!-- Main Content (hidden until logged in) -->
+    <div id="mainContent">
+      <pre id="credentials" style="font-weight: bold"></pre>
+      <button type="button" onclick="window.location.reload()">Logout</button>
+
+      <h1>Item and Group Creation</h1>
+
+      <form onsubmit="event.preventDefault(); encryptFileAndSubmit();">
+        <h2>Create Item</h2>
+        <label for="itemFile">Choose a file:</label>
+        <input type="file" id="itemFile" name="itemFile" required />
+        <br /><br />
+        <button type="submit">Submit Item</button>
+      </form>
+
+      <hr />
+
+      <!-- <form action="/submit-group" method="post">
+        <h2>Create Group</h2>
+        <label for="groupName">Group Name:</label>
+        <input type="text" id="groupName" name="groupName" required />
+        <br /><br />
+        <button type="submit">Submit Group</button>
+      </form>
+
+      <hr /> -->
+
+      <!-- View Items Section -->
+      <div id="viewItemsSection">
+        <h2>View Items</h2>
+        <label for="groupDropdown">Select a Group:</label>
+        <select id="groupDropdown" onchange="handleGroupSelectionChange()">
+          <option value="-2">world (no perms)</option>
+        </select>
+        <div id="itemsGrid"></div>
+      </div>
+    </div>
+  </body>
+</html>

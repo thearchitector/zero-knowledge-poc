@@ -15,6 +15,7 @@ dependencies = [
     "alembic>=1.13.2",
     "asyncio-atexit>=1.0.1",
     "uvicorn[standard]>=0.30.6",
+    "python-multipart>=0.0.9",
 ]
 
 [tool.pdm]
