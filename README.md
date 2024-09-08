@@ -6,7 +6,8 @@ horribly slow/unoptimized for the sake of simplicity. NOT reference implementati
 
 - users can login/be created
 - users can create items
-- users in groups can see all items in the group
+- users can see items shared with groups they're in
+- users cannot see items shared with groups they're not in
 - server can never see the item data, or any other private data, its encrypted
 
 copyright 2024 elias gabriel. not for redistribution or modification. all rights reserved.
