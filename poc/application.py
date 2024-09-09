@@ -11,6 +11,8 @@ from .models import Group, Grouping, Item, Sharing, User
 
 app = FastAPI(debug=True)
 
+EncodedBytes = Annotated[str, Form()]
+
 ##
 ## USERS
 ##
@@ -19,11 +21,16 @@ app = FastAPI(debug=True)
 @app.post("/create_user")
 async def create_user(
     email: Annotated[str, Form()],
-    encryption_key: Annotated[str, Form()],
+    encryption_key: EncodedBytes,
+    encryption_key_salt: EncodedBytes,
     session: SessionDependency,
 ):
     # create user
-    u = User(email=email, encryption_key=encryption_key)
+    u = User(
+        email=email,
+        encryption_key=encryption_key,
+        encryption_key_salt=encryption_key_salt,
+    )
     session.add(u)
     await session.commit()
     await session.refresh(u)
@@ -55,9 +62,9 @@ async def get_users(session: SessionDependency):
 @app.post("/create_item")
 async def create_item(
     owner_user_id: Annotated[int, Form()],
-    encryption_key: Annotated[str, Form()],
-    encryption_key_nonce: Annotated[str, Form()],
-    content_nonce: Annotated[str, Form()],
+    encryption_key: EncodedBytes,
+    encryption_key_nonce: EncodedBytes,
+    content_nonce: EncodedBytes,
     content: UploadFile,
     session: SessionDependency,
 ):
@@ -127,8 +134,7 @@ async def view_item(item_id: int, session: SessionDependency):
 async def create_group(
     host_user_id: Annotated[int, Form()],
     name: Annotated[str, Form()],
-    encryption_key: Annotated[str, Form()],
-    encryption_key_nonce: Annotated[str, Form()],
+    grouping_encryption_key: EncodedBytes,
     session: SessionDependency,
 ):
     # create group
@@ -141,8 +147,7 @@ async def create_group(
         Grouping(
             user_id=host_user_id,
             group_id=await g.awaitable_attrs.id,
-            encryption_key=encryption_key,
-            encryption_key_nonce=encryption_key_nonce,
+            encryption_key=grouping_encryption_key,
         )
     )
     await session.commit()

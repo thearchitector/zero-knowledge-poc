@@ -2,7 +2,9 @@
 
 poc for testing a zero-knowledge group-based asset system for tgf
 
-horribly slow/unoptimized for the sake of simplicity. NOT reference implementation
+the application layer on the UI & BE are horribly slow and unoptimized.
+
+the cryptographic model is higher fidelity / (nearly) production ready.
 
 - users can login/be created
 - users can create items

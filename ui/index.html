@@ -22,53 +22,45 @@
         max-height: 200px;
       }
     </style>
-    <script src="nacl-fast.min.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/hash-wasm@4.11.0/dist/argon2.umd.min.js"
+      integrity="sha256-o5Q2B3wQN6xf0+9YVQJt4W3ukKO/TyKRuYLgWlHNGwc="
+      crossorigin="anonymous"
+    ></script>
     <script>
       async function generateKeyPair(password, salt) {
         /**
-         * generate a user's key pair from their password and a salt. both are
-         * deterministic. the salt ensures uniqueness if passwords match between users
+         * generate a user's key pair from their password and a salt. the salt ensures
+         * uniqueness if passwords match between users.
          **/
-        const enc = new TextEncoder();
-        const keyMaterial = await window.crypto.subtle.importKey(
-          "raw",
-          enc.encode(password),
-          "PBKDF2",
-          false,
-          ["deriveBits"]
-        );
-        const secretBits = await window.crypto.subtle.deriveBits(
-          {
-            name: "PBKDF2",
-            hash: "SHA-256",
-            salt: enc.encode(salt),
-            iterations: 100000,
-          },
-          keyMaterial,
-          256
-        );
-        return nacl.box.keyPair.fromSecretKey(new Uint8Array(secretBits));
+        // parameter recommendation for memory-constrained environments
+        // @ref https://www.rfc-editor.org/rfc/rfc9106.html#section-4-6.2
+        const key = await hashwasm.argon2id({
+          // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/normalize#compatibility_normalization
+          password: password.normalize("NFKC"),
+          salt,
+          parallelism: 4, // p=4
+          iterations: 3, // t=3
+          memorySize: 65536, // m=65536, 64 MiB
+          hashLength: 32, // T=256, 32 bytes used by libsodium
+          outputType: "binary",
+        });
+        return sodium.crypto_box_seed_keypair(key);
       }
 
       function serializeBytes(key) {
-        /**
-         * convert raw data to base 64 string
-         **/
-        return btoa(String.fromCharCode(...new Uint8Array(key)));
+        return sodium.to_base64(key, sodium.base64_variants.ORIGINAL_NO_PADDING);
       }
 
-      function deserializeBytes(serializedKey) {
-        /**
-         * convert base 64 string to raw data
-         **/
-        return Uint8Array.from(atob(serializedKey), (char) => char.charCodeAt(0));
+      function deserializeBytes(ser) {
+        return sodium.from_base64(ser, sodium.base64_variants.ORIGINAL_NO_PADDING);
       }
 
       async function handleLogin(event) {
         /**
-         * NOT how we would handle user login/creation in prod. if user exists, we're
-         * good. if the user doesn't exist, create it and then create their personal
-         * group.
+         * if user exists, we're good. if the user doesn't exist, create it and then
+         * create their personal group. password is not actually checked here, only
+         * used to compute the key pair
          **/
         event.preventDefault(); // Prevent form submission
         const email = document.getElementById("loginEmail").value;
@@ -81,36 +73,37 @@
               `/get_user?email=${encodeURIComponent(email)}`
             );
 
-            let userId;
-            let keyPair;
-
             if (response.status === 200) {
               // User exists, extract the user_id and generate the key pair
               const data = await response.json();
-              userId = data.id;
-              keyPair = await generateKeyPair(password, email);
+              const userId = data.id;
+              const keyPair = await generateKeyPair(
+                password,
+                deserializeBytes(data.encryption_key_salt)
+              );
 
               // Set window properties
               window.userId = userId;
-              window.encryptionKeyPair = keyPair;
+              window.userKeyPair = keyPair;
             } else if (response.status === 403) {
               // User does not exist, create a new user
-              keyPair = await generateKeyPair(password, email);
-              const publicKeyBase64 = serializeBytes(keyPair.publicKey);
+              const keySalt = sodium.randombytes_buf(16);
+              const keyPair = await generateKeyPair(password, keySalt);
 
               // Send a POST request to create the user
               const formData = new FormData();
               formData.append("email", email);
-              formData.append("encryption_key", publicKeyBase64);
+              formData.append("encryption_key", serializeBytes(keyPair.publicKey));
+              formData.append("encryption_key_salt", serializeBytes(keySalt));
               const createResponse = await sendFormData("/create_user", formData);
 
               if (createResponse.status === 200) {
                 const data = await createResponse.json();
-                userId = data.id;
+                const userId = data.id;
 
                 // Set window properties
                 window.userId = userId;
-                window.encryptionKeyPair = keyPair;
+                window.userKeyPair = keyPair;
 
                 await createGroup(`user ${window.userId}'s group`);
               } else {
@@ -122,9 +115,9 @@
             }
 
             // Show the main content
-            await fetchAndDisplayItems();
             await fetchMemberships();
-            displayCredentials(email, userId, keyPair);
+            await fetchAndDisplayItems();
+            displayCredentials(email, window.userId, window.userKeyPair);
           } catch (error) {
             console.error("Error during login:", error);
             alert("An error occurred. Please try again.");
@@ -135,7 +128,7 @@
       }
 
       function displayCredentials(email, userId, keyPair) {
-        const privateKeyBase64 = serializeBytes(keyPair.secretKey);
+        const privateKeyBase64 = serializeBytes(keyPair.privateKey);
         const publicKeyBase64 = serializeBytes(keyPair.publicKey);
 
         document.getElementById("credentials").innerText =
@@ -156,44 +149,25 @@
     </script>
     <script>
       async function createGroup(name) {
-        // create private group & grouping encrypted using user's key
-        const { symmetricKey, exportedSymmetricKey } = await createSymmetricKey();
+        // create private group's symmetric key
+        const symmetricKey = sodium.crypto_secretbox_keygen();
 
-        // Generate a nonce for encrypting the symmetric key using TweetNaCl
-        const encryptionKeyNonce = nacl.randomBytes(24);
-        // Encrypt the symmetric key using the encryptionKeyPair and the
-        // generated nonce
-        const encryptedSymmetricKey = nacl.box(
-          new Uint8Array(exportedSymmetricKey),
-          encryptionKeyNonce,
-          window.encryptionKeyPair.publicKey,
-          window.encryptionKeyPair.secretKey
+        const encryptedSymmetricKey = sodium.crypto_box_seal(
+          symmetricKey,
+          window.userKeyPair.publicKey
         );
 
         const formData = new FormData();
         formData.append("host_user_id", window.userId);
         formData.append("name", name);
-        formData.append("encryption_key", serializeBytes(encryptedSymmetricKey));
-        formData.append("encryption_key_nonce", serializeBytes(encryptionKeyNonce));
+        formData.append(
+          "grouping_encryption_key",
+          serializeBytes(encryptedSymmetricKey)
+        );
         await sendFormData("/create_group", formData);
       }
     </script>
     <script>
-      async function createSymmetricKey() {
-        // Generate a symmetric encryption key. the algorithm here doesn't really matter
-        // as long as its symmetric can be done in browser
-        const symmetricKey = await crypto.subtle.generateKey(
-          { name: "AES-GCM", length: 256 },
-          true,
-          ["encrypt", "decrypt"]
-        );
-        const exportedSymmetricKey = await crypto.subtle.exportKey("raw", symmetricKey);
-        return {
-          symmetricKey: symmetricKey,
-          exportedSymmetricKey: exportedSymmetricKey,
-        };
-      }
-
       async function sendFormData(url, formData) {
         try {
           // Send the FormData to the server using async/await
@@ -283,25 +257,13 @@
          * decrypt the group's key using the user's private key and the encrypted
          * key available on their grouping
          **/
-        const rawKey = nacl.box.open(
-          deserializeBytes(grouping.encryption_key),
-          deserializeBytes(grouping.encryption_key_nonce),
-          window.encryptionKeyPair.publicKey,
-          window.encryptionKeyPair.secretKey
+        const encryptedGroupKey = deserializeBytes(grouping.encryption_key);
+        const groupKey = sodium.crypto_box_seal_open(
+          encryptedGroupKey,
+          window.userKeyPair.publicKey,
+          window.userKeyPair.privateKey
         );
-
-        const groupPrivateKey = await crypto.subtle.importKey(
-          "raw",
-          rawKey,
-          {
-            name: "AES-GCM",
-            length: 256,
-          },
-          true,
-          ["encrypt", "decrypt"]
-        );
-
-        return groupPrivateKey;
+        return groupKey;
       }
 
       async function encryptFileAndSubmit() {
@@ -316,49 +278,44 @@
           return;
         }
 
-        // decrypt the private group key from the grouping using the user's priv key.
+        // decrypt the group key from the grouping using the user's private key.
         // assuming here that the first grouping returned is the one associated with
         // their private group
-        const groupPrivateKey = await decryptGroupKey(
-          window.groupMemberships[0].grouping
+        const groupKey = await decryptGroupKey(window.groupMemberships[0].grouping);
+        // generate a new symmetric content encryption key and nonce
+        const contentKey = sodium.crypto_secretbox_keygen();
+        const keyEncryptionNonce = sodium.randombytes_buf(
+          sodium.crypto_secretbox_NONCEBYTES
         );
-        console.log("group", groupPrivateKey);
-        // generate a new symmetric content encryption key
-        const { symmetricKey, exportedSymmetricKey } = await createSymmetricKey();
-        console.log("key", symmetricKey);
 
-        // encrypt the content encryption key using the user's group's private key
-        const keyEncryptionNonce = nacl.randomBytes(12);
-        console.log("key nonce", keyEncryptionNonce);
-        const encryptedSymmetricKey = await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv: keyEncryptionNonce },
-          groupPrivateKey,
-          exportedSymmetricKey
+        // encrypt the content encryption key using the user's group's key
+        // groupKey is also an instance of a secretbox key
+        const encryptedContentKey = sodium.crypto_secretbox_easy(
+          contentKey,
+          keyEncryptionNonce,
+          groupKey
         );
-        console.log("key enc", encryptedSymmetricKey);
 
         const file = fileInput.files[0];
-        const fileArrayBuffer = await file.arrayBuffer();
 
-        // Generate a nonce (IV) for AES-GCM using TweetNaCl
-        const contentNonce = nacl.randomBytes(12); // 12-byte nonce for AES-GCM
+        const contentNonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
         // Encrypt the file content using the symmetric key and the generated nonce
-        const encryptedFileContent = await crypto.subtle.encrypt(
-          { name: "AES-GCM", iv: contentNonce },
-          symmetricKey,
-          fileArrayBuffer
+        const encryptedFileContent = sodium.crypto_secretbox_easy(
+          await file.bytes(),
+          contentNonce,
+          contentKey
         );
 
         // Prepare the FormData payload
         const formData = new FormData();
         formData.append("owner_user_id", window.userId);
-        formData.append("encryption_key", serializeBytes(encryptedSymmetricKey));
+        formData.append("encryption_key", serializeBytes(encryptedContentKey));
         formData.append("encryption_key_nonce", serializeBytes(keyEncryptionNonce));
-        formData.append("content_nonce", serializeBytes(contentNonce));
         formData.append(
           "content",
           new Blob([encryptedFileContent], { type: "application/octet-stream" })
         );
+        formData.append("content_nonce", serializeBytes(contentNonce));
         await sendFormData("/create_item", formData);
         await fetchAndDisplayItems();
       }
@@ -369,25 +326,22 @@
           const response = await fetch(`/get_memberships?user_id=${window.userId}`);
           if (response.ok) {
             const memberships = await response.json();
-            populateGroupDropdown(memberships);
+            const dropdown = document.getElementById("groupDropdown");
+
+            memberships.forEach((membership, index) => {
+              const option = document.createElement("option");
+              option.value = index;
+              option.text = membership.group.name;
+              dropdown.add(option);
+            });
+
+            window.groupMemberships = memberships;
           } else {
             console.error("Failed to fetch memberships.");
           }
         } catch (error) {
           console.error("Error fetching memberships:", error);
         }
-      }
-
-      function populateGroupDropdown(memberships) {
-        const dropdown = document.getElementById("groupDropdown");
-
-        window.groupMemberships = memberships;
-        memberships.forEach((membership, index) => {
-          const option = document.createElement("option");
-          option.value = index;
-          option.text = membership.group.name;
-          dropdown.add(option);
-        });
       }
 
       async function handleGroupSelectionChange() {
@@ -403,8 +357,7 @@
             const img = item.children[0];
             // fetch the raw content again
             const rawResp = await fetch(img.dataset.raw);
-            const buffer = await rawResp.arrayBuffer();
-            const encryptedFileContent = new Uint8Array(buffer);
+            const encryptedFileContent = await rawResp.bytes();
 
             // attempt to decrypt the file
             const fileContent = await decryptFile(
@@ -426,7 +379,12 @@
         }
       }
 
-      async function decryptFile(encryptedFileContent, contentNonce, grouping, itemId) {
+      async function decryptFile(
+        encryptedFileContent,
+        encodedContentNonce,
+        grouping,
+        itemId
+      ) {
         /**
          * decrypts the provided file content using the stored nonce, grouping, and item
          * id.
@@ -436,43 +394,39 @@
         );
         if (sharingResponse.status != 200) return null;
         const sharing = await sharingResponse.json();
-        const groupPrivateKey = await decryptGroupKey(grouping);
-        console.log("group", groupPrivateKey);
-        const itemKey = await decryptItemKey(sharing, groupPrivateKey);
-        const fileContent = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: deserializeBytes(contentNonce) },
-          itemKey,
-          encryptedFileContent
+        const groupKey = await decryptGroupKey(grouping);
+        const itemKey = await decryptItemKey(sharing, groupKey);
+
+        const contentNonce = deserializeBytes(encodedContentNonce);
+        const fileContent = sodium.crypto_secretbox_open_easy(
+          encryptedFileContent,
+          contentNonce,
+          itemKey
         );
         return fileContent;
       }
 
-      async function decryptItemKey(sharing, groupPrivateKey) {
+      async function decryptItemKey(sharing, groupKey) {
         /**
-         * decrypt the item's private key using the group's key
+         * decrypt the item's private key from the sharing using the group's key
          **/
-        console.log("key nonce", deserializeBytes(sharing.encryption_key_nonce));
-        console.log("key enc", deserializeBytes(sharing.encryption_key));
-        const rawKey = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv: deserializeBytes(sharing.encryption_key_nonce) },
-          groupPrivateKey,
-          deserializeBytes(sharing.encryption_key)
+        const encryptedEncryptionKey = deserializeBytes(sharing.encryption_key);
+        const keyEncryptionNonce = deserializeBytes(sharing.encryption_key_nonce);
+        const itemKey = sodium.crypto_secretbox_open_easy(
+          encryptedEncryptionKey,
+          keyEncryptionNonce,
+          groupKey
         );
-
-        const itemPrivateKey = await crypto.subtle.importKey(
-          "raw",
-          rawKey,
-          {
-            name: "AES-GCM",
-            length: 256,
-          },
-          true,
-          ["encrypt", "decrypt"]
-        );
-        console.log("key", itemPrivateKey);
-        return itemPrivateKey;
+        return itemKey;
       }
     </script>
+    <script>
+      // global initialize
+      window.sodium = {
+        onload: (sodium) => (globalThis.sodium = sodium),
+      };
+    </script>
+    <script src="sodium.js"></script>
   </head>
   <body>
     <!-- Login/Account Creation Form -->

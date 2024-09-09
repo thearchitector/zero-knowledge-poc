@@ -15,6 +15,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True, init=False)
     email: Mapped[str]
     encryption_key: Mapped[str]  # user's public key
+    encryption_key_salt: Mapped[str]  # salt used to gen key pair
 
 
 class Group(Base):
@@ -48,7 +49,6 @@ class Grouping(Base):
     encryption_key: Mapped[
         str
     ]  # group's symmetric key encrypted with user's public key
-    encryption_key_nonce: Mapped[str]  # random value used for key encryption
 
 
 class Sharing(Base):
