@@ -25,7 +25,9 @@ class Group(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, init=False)
     name: Mapped[str]
-    host_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    host_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id")
+    )  # the host of the group. a couple interesting things we can do here. either leave it nullable, so the built-in World/Community groups are owned by nobody, or ALSO have a built-in goddess user
 
 
 class Item(Base):

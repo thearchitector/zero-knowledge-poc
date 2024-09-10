@@ -1,4 +1,5 @@
 import itertools
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Form, HTTPException, UploadFile, status
@@ -6,10 +7,26 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from .db import SessionDependency
+from .db import SessionDependency, create_session
 from .models import Group, Grouping, Item, Sharing, User
 
-app = FastAPI(debug=True)
+WORLD_GROUP_ID: int = 0
+
+
+@asynccontextmanager
+async def create_default_groups(_: FastAPI):
+    # DEBUG ONLY
+    # ensure that the first group that exits in the application is World
+    async with create_session() as session:
+        group: Group | None = await session.get(Group, WORLD_GROUP_ID)
+        if not group:
+            session.add(Group(host_user_id=None, name="World"))
+            await session.commit()
+
+    yield
+
+
+app = FastAPI(lifespan=create_default_groups, debug=True)
 
 EncodedBytes = Annotated[str, Form()]
 
@@ -156,26 +173,21 @@ async def create_group(
     return g
 
 
-# @app.post("/invite_to_group")
-# async def invite_to_group(
-#     invitee_id: int,
-#     group_id: int,
-#     # invitee_encryption_key: RawBytes
-#     encryption_key: RawBytes,
-#     encryption_key_nonce: RawBytes,
-#     session: SessionDependency,
-# ):
-#     # create new grouping. "status" (invite -> accept) not needed for POC
-#     grouping = Grouping(
-#         user_id=invitee_id,
-#         group_id=group_id,
-#         encryption_key=encryption_key,
-#         encryption_key_nonce=encryption_key_nonce,
-#     )
-#     session.add(grouping)
-#     await session.commit()
-#     await session.refresh(grouping)
-#     return grouping
+@app.post("/invite_to_group")
+async def invite_to_group(
+    invitee_id: Annotated[int, Form()],
+    group_id: Annotated[int, Form()],
+    grouping_encryption_key: EncodedBytes,
+    session: SessionDependency,
+):
+    # create new grouping. "status" (invite -> accept) not needed for POC
+    grouping = Grouping(
+        user_id=invitee_id, group_id=group_id, encryption_key=grouping_encryption_key
+    )
+    session.add(grouping)
+    await session.commit()
+    await session.refresh(grouping)
+    return grouping
 
 
 # class RemoveFromGroupParams(BaseModel):

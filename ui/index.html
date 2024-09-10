@@ -28,6 +28,12 @@
       crossorigin="anonymous"
     ></script>
     <script>
+      const WORLD_GROUP_ID = 0;
+      const WORLD_GROUP_KEY = new Uint8Array([
+        226, 62, 125, 71, 36, 12, 128, 110, 27, 103, 85, 13, 88, 205, 207, 115, 25, 63,
+        10, 215, 77, 154, 80, 204, 168, 42, 146, 137, 125, 106, 198, 58,
+      ]);
+
       async function generateKeyPair(password, salt) {
         /**
          * generate a user's key pair from their password and a salt. the salt ensures
@@ -86,29 +92,7 @@
               window.userId = userId;
               window.userKeyPair = keyPair;
             } else if (response.status === 403) {
-              // User does not exist, create a new user
-              const keySalt = sodium.randombytes_buf(16);
-              const keyPair = await generateKeyPair(password, keySalt);
-
-              // Send a POST request to create the user
-              const formData = new FormData();
-              formData.append("email", email);
-              formData.append("encryption_key", serializeBytes(keyPair.publicKey));
-              formData.append("encryption_key_salt", serializeBytes(keySalt));
-              const createResponse = await sendFormData("/create_user", formData);
-
-              if (createResponse.status === 200) {
-                const data = await createResponse.json();
-                const userId = data.id;
-
-                // Set window properties
-                window.userId = userId;
-                window.userKeyPair = keyPair;
-
-                await createGroup(`user ${window.userId}'s group`);
-              } else {
-                alert("Failed to create user. Please try again.");
-              }
+              await createUser(email);
             } else {
               alert("Unexpected response from the server.");
               return;
@@ -148,6 +132,47 @@
       }
     </script>
     <script>
+      async function createUser(name) {
+        // User does not exist, create a new user
+        const keySalt = sodium.randombytes_buf(16);
+        const keyPair = await generateKeyPair(password, keySalt);
+
+        // Send a POST request to create the user
+        const formData = new FormData();
+        formData.append("email", email);
+        formData.append("encryption_key", serializeBytes(keyPair.publicKey));
+        formData.append("encryption_key_salt", serializeBytes(keySalt));
+        const createResponse = await sendFormData("/create_user", formData);
+
+        if (createResponse.status === 200) {
+          const data = await createResponse.json();
+          const userId = data.id;
+
+          // Set window properties
+          window.userId = userId;
+          window.userKeyPair = keyPair;
+
+          // invite the new user to World
+          const encryptedWorldKey = sodium.crypto_box_seal(
+            WORLD_GROUP_KEY,
+            window.userKeyPair.publicKey
+          );
+          const inviteFormData = new FormData();
+          inviteFormData.append("invitee_id", userId);
+          inviteFormData.append("group_id", WORLD_GROUP_ID);
+          inviteFormData.append(
+            "grouping_encryption_key",
+            serializeBytes(encryptedWorldKey)
+          );
+          await sendFormData("/invite_to_group", inviteFormData);
+
+          // create the user's personal group
+          await createGroup(`user ${window.userId}'s group`);
+        } else {
+          alert("Failed to create user. Please try again.");
+        }
+      }
+
       async function createGroup(name) {
         // create private group's symmetric key
         const symmetricKey = sodium.crypto_secretbox_keygen();
@@ -186,69 +211,6 @@
           console.error(`${url} error:`, error);
           alert(`${url} error.`);
         }
-      }
-    </script>
-    <script>
-      async function fetchAndDisplayItems() {
-        try {
-          const response = await fetch(`/get_items`);
-          if (response.ok) {
-            const items = await response.json(); // Get list of item IDs (integers)
-
-            // Create an array of promises for fetching each item concurrently
-            const fetchPromises = items.map((item) => fetchAndMakeItem(item));
-
-            // Wait for all fetchAndMakeItem promises to resolve
-            const divs = await Promise.all(fetchPromises);
-            const itemsGrid = document.getElementById("itemsGrid");
-            itemsGrid.replaceChildren(...divs);
-          } else {
-            console.error("Failed to fetch items.");
-          }
-        } catch (error) {
-          console.error("Error fetching items:", error);
-        }
-      }
-
-      async function fetchAndMakeItem(item) {
-        try {
-          // stream the encrypted content from the server
-          const response = await fetch(`/view_item?item_id=${item.id}`);
-          const chunks = [];
-          for await (const chunk of response.body) {
-            chunks.push(chunk);
-          }
-
-          const blob = new Blob(chunks, { type: "application/octet-stream" }); // Combine chunks into a single Blob
-          const objectUrl = URL.createObjectURL(blob);
-
-          return makeImage(objectUrl, item); // Display the image or fallback
-        } catch (error) {
-          console.error("Error fetching item:", error);
-        }
-      }
-
-      function makeImage(imageUrl, item) {
-        const itemDiv = document.createElement("div");
-        itemDiv.className = "item";
-
-        // Create the img tag with an onerror fallback to a gray box
-        const imgElement = document.createElement("img");
-        imgElement.src = imageUrl;
-        imgElement.dataset.raw = imageUrl;
-        imgElement.dataset.itemId = item.id;
-        imgElement.dataset.nonce = item.content_nonce;
-        imgElement.onerror = function () {
-          this.onerror = null;
-          this.src =
-            "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgdmlld0JveD0iMCAwIDIwMCAyMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjIwMCIgaGVpZ2h0PSIyMDAiIGZpbGw9IiM5OTk5OTkiLz48L3N2Zz4=";
-        };
-        // imgElement.onload = () => {
-        //   URL.revokeObjectURL(imageUrl);
-        // };
-
-        itemDiv.appendChild(imgElement);
-        return itemDiv;
       }
     </script>
     <script>
@@ -343,46 +305,79 @@
           console.error("Error fetching memberships:", error);
         }
       }
-
-      async function handleGroupSelectionChange() {
+    </script>
+    <script>
+      async function fetchAndDisplayItems() {
         const dropdown = document.getElementById("groupDropdown");
-        const selectedGroup = parseInt(dropdown.value);
+        const selectedMembership = parseInt(dropdown.value);
+        const selectedGrouping = window.groupMemberships[selectedMembership].grouping;
 
-        if (selectedGroup != -2) {
-          const itemsGrid = document.getElementById("itemsGrid");
-          // for every item, attempt to decrypt it using the selected grouping->sharing
-          // chain. if the grouping is incorrect, or the sharing doesn't exist, the item
-          // cannot be viewed
-          for (const item of itemsGrid.children) {
-            const img = item.children[0];
-            // fetch the raw content again
-            const rawResp = await fetch(img.dataset.raw);
-            const encryptedFileContent = await rawResp.bytes();
+        try {
+          const response = await fetch(`/get_items`);
+          if (response.ok) {
+            const items = await response.json(); // Get list of item IDs (integers)
 
-            // attempt to decrypt the file
-            const fileContent = await decryptFile(
-              encryptedFileContent,
-              img.dataset.nonce,
-              window.groupMemberships[selectedGroup].grouping,
-              parseInt(img.dataset.itemId)
+            // Create an array of promises for fetching each item concurrently
+            const fetchPromises = items.map((item) =>
+              fetchAndMakeItem(selectedGrouping, item)
             );
-            if (fileContent === null) {
-              console.log("no access");
-              continue;
-            }
-            // if we did decrypt it, replace the img src
-            const blob = new Blob([fileContent], { type: "application/octet-stream" });
-            const objectUrl = URL.createObjectURL(blob);
-            img.src = objectUrl;
-            img.onload = () => URL.revokeObjectURL(objectUrl);
+
+            // Wait for all fetchAndMakeItem promises to resolve
+            const divs = await Promise.all(fetchPromises);
+            const itemsGrid = document.getElementById("itemsGrid");
+            itemsGrid.replaceChildren(...divs);
+          } else {
+            console.error("Failed to fetch items.");
           }
+        } catch (error) {
+          console.error("Error fetching items:", error);
+        }
+      }
+
+      async function fetchAndMakeItem(selectedGrouping, item) {
+        try {
+          // stream the encrypted content from the server
+          const response = await fetch(`/view_item?item_id=${item.id}`);
+          const chunks = [];
+          for await (const chunk of response.body) {
+            chunks.push(chunk);
+          }
+          const encryptedFileContent = new Uint8Array(chunks);
+
+          const itemDiv = document.createElement("div");
+          itemDiv.className = "item";
+
+          // Create the img tag with an onerror fallback to a gray box
+          const imgElement = document.createElement("img");
+
+          // attempt to decrypt the file
+          const fileContent = await decryptFile(
+            encryptedFileContent,
+            item.content_nonce,
+            selectedGrouping,
+            item.id
+          );
+          if (fileContent === null) {
+            console.log("no access");
+            imgElement.src =
+              "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgdmlld0JveD0iMCAwIDIwMCAyMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjIwMCIgaGVpZ2h0PSIyMDAiIGZpbGw9IiM5OTk5OTkiLz48L3N2Zz4=";
+            return;
+          }
+
+          // if we did decrypt it, replace the img src
+          const blob = new Blob([fileContent], { type: "application/octet-stream" });
+          const objectUrl = URL.createObjectURL(blob);
+          img.src = objectUrl;
+          img.onload = () => URL.revokeObjectURL(objectUrl);
+        } catch (error) {
+          console.error("Error fetching item:", error);
         }
       }
 
       async function decryptFile(
         encryptedFileContent,
         encodedContentNonce,
-        grouping,
+        selectedGrouping,
         itemId
       ) {
         /**
@@ -390,11 +385,11 @@
          * id.
          **/
         const sharingResponse = await fetch(
-          `/get_sharing?group_id=${grouping.group_id}&item_id=${itemId}`
+          `/get_sharing?group_id=${selectedGrouping.group_id}&item_id=${itemId}`
         );
         if (sharingResponse.status != 200) return null;
         const sharing = await sharingResponse.json();
-        const groupKey = await decryptGroupKey(grouping);
+        const groupKey = await decryptGroupKey(selectedGrouping);
         const itemKey = await decryptItemKey(sharing, groupKey);
 
         const contentNonce = deserializeBytes(encodedContentNonce);
@@ -474,9 +469,7 @@
       <div id="viewItemsSection">
         <h2>View Items</h2>
         <label for="groupDropdown">Select a Group:</label>
-        <select id="groupDropdown" onchange="handleGroupSelectionChange()">
-          <option value="-2">world (no perms)</option>
-        </select>
+        <select id="groupDropdown" onchange="fetchAndDisplayItems()"></select>
         <div id="itemsGrid"></div>
       </div>
     </div>

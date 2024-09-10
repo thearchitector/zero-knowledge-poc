@@ -28,6 +28,7 @@ def create_sessionmaker(db_url, autoflush=True, expire_on_commit=True, **kwargs)
     )
 
 
+@asynccontextmanager
 async def create_session():
     session_maker = create_sessionmaker(DB_URL)
 
