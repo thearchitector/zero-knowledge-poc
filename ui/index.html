@@ -28,7 +28,7 @@
       crossorigin="anonymous"
     ></script>
     <script>
-      const WORLD_GROUP_ID = 0;
+      const WORLD_GROUP_ID = 1;
       const WORLD_GROUP_KEY = new Uint8Array([
         226, 62, 125, 71, 36, 12, 128, 110, 27, 103, 85, 13, 88, 205, 207, 115, 25, 63,
         10, 215, 77, 154, 80, 204, 168, 42, 146, 137, 125, 106, 198, 58,
@@ -92,7 +92,7 @@
               window.userId = userId;
               window.userKeyPair = keyPair;
             } else if (response.status === 403) {
-              await createUser(email);
+              await createUser(email, password);
             } else {
               alert("Unexpected response from the server.");
               return;
@@ -132,7 +132,7 @@
       }
     </script>
     <script>
-      async function createUser(name) {
+      async function createUser(email, password) {
         // User does not exist, create a new user
         const keySalt = sodium.randombytes_buf(16);
         const keyPair = await generateKeyPair(password, keySalt);
@@ -152,6 +152,9 @@
           window.userId = userId;
           window.userKeyPair = keyPair;
 
+          // create the user's personal group
+          await createGroup(`user ${window.userId}'s group`);
+
           // invite the new user to World
           const encryptedWorldKey = sodium.crypto_box_seal(
             WORLD_GROUP_KEY,
@@ -165,9 +168,6 @@
             serializeBytes(encryptedWorldKey)
           );
           await sendFormData("/invite_to_group", inviteFormData);
-
-          // create the user's personal group
-          await createGroup(`user ${window.userId}'s group`);
         } else {
           alert("Failed to create user. Please try again.");
         }
@@ -243,7 +243,10 @@
         // decrypt the group key from the grouping using the user's private key.
         // assuming here that the first grouping returned is the one associated with
         // their private group
-        const groupKey = await decryptGroupKey(window.groupMemberships[0].grouping);
+        const privateGroup = window.groupMemberships.find(
+          (membership) => membership.group.private
+        );
+        const groupKey = await decryptGroupKey(privateGroup.grouping);
         // generate a new symmetric content encryption key and nonce
         const contentKey = sodium.crypto_secretbox_keygen();
         const keyEncryptionNonce = sodium.randombytes_buf(
@@ -338,11 +341,7 @@
         try {
           // stream the encrypted content from the server
           const response = await fetch(`/view_item?item_id=${item.id}`);
-          const chunks = [];
-          for await (const chunk of response.body) {
-            chunks.push(chunk);
-          }
-          const encryptedFileContent = new Uint8Array(chunks);
+          const encryptedFileContent = await streamResponse(response);
 
           const itemDiv = document.createElement("div");
           itemDiv.className = "item";
@@ -360,18 +359,45 @@
           if (fileContent === null) {
             console.log("no access");
             imgElement.src =
-              "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgdmlld0JveD0iMCAwIDIwMCAyMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjIwMCIgaGVpZ2h0PSIyMDAiIGZpbGw9IiM5OTk5OTkiLz48L3N2Zz4=";
-            return;
+              "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'%3E%3Cpath fill='%23999' d='M0 0h200v200H0z'/%3E%3C/svg%3E";
+            return imgElement;
           }
 
           // if we did decrypt it, replace the img src
           const blob = new Blob([fileContent], { type: "application/octet-stream" });
           const objectUrl = URL.createObjectURL(blob);
-          img.src = objectUrl;
-          img.onload = () => URL.revokeObjectURL(objectUrl);
+          imgElement.src = objectUrl;
+          imgElement.onload = () => URL.revokeObjectURL(objectUrl);
+          return imgElement;
         } catch (error) {
           console.error("Error fetching item:", error);
         }
+      }
+
+      async function streamResponse(response) {
+        const reader = response.body.getReader();
+
+        let chunks = [];
+        let totalLength = 0;
+
+        // Read the stream in chunks
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          totalLength += value.length;
+        }
+
+        // Pre-allocate the final Uint8Array and copy each chunk into it
+        let content = new Uint8Array(totalLength);
+        let offset = 0;
+
+        for (const chunk of chunks) {
+          content.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        return content;
       }
 
       async function decryptFile(
@@ -384,6 +410,7 @@
          * decrypts the provided file content using the stored nonce, grouping, and item
          * id.
          **/
+        // try {
         const sharingResponse = await fetch(
           `/get_sharing?group_id=${selectedGrouping.group_id}&item_id=${itemId}`
         );
@@ -399,6 +426,9 @@
           itemKey
         );
         return fileContent;
+        // } catch {
+        //   return null;
+        // }
       }
 
       async function decryptItemKey(sharing, groupKey) {

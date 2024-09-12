@@ -36,4 +36,9 @@ async def create_session():
         yield session
 
 
-SessionDependency = Annotated[AsyncSession, Depends(create_session)]
+async def _dependency():
+    async with create_session() as session:
+        yield session
+
+
+SessionDependency = Annotated[AsyncSession, Depends(_dependency)]

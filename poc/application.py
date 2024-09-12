@@ -5,12 +5,12 @@ from typing import Annotated
 from fastapi import FastAPI, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import exists, func, select
 
 from .db import SessionDependency, create_session
 from .models import Group, Grouping, Item, Sharing, User
 
-WORLD_GROUP_ID: int = 0
+WORLD_GROUP_ID: int = 1
 
 
 @asynccontextmanager
@@ -20,7 +20,7 @@ async def create_default_groups(_: FastAPI):
     async with create_session() as session:
         group: Group | None = await session.get(Group, WORLD_GROUP_ID)
         if not group:
-            session.add(Group(host_user_id=None, name="World"))
+            session.add(Group(host_user_id=None, name="World", private=False))
             await session.commit()
 
     yield
@@ -154,8 +154,14 @@ async def create_group(
     grouping_encryption_key: EncodedBytes,
     session: SessionDependency,
 ):
+    num_existing: int = (
+        await session.execute(
+            select(func.count()).where(Group.host_user_id == host_user_id)
+        )
+    ).scalar_one()
+
     # create group
-    g = Group(name=name, host_user_id=host_user_id)
+    g = Group(name=name, host_user_id=host_user_id, private=(num_existing == 0))
     session.add(g)
     await session.commit()
 
