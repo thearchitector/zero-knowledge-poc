@@ -8,6 +8,10 @@
       #mainContent {
         display: none;
       }
+      /* 
+      #loginForm {
+        display: none;
+      } */
 
       #itemsGrid {
         display: flex;
@@ -21,12 +25,14 @@
         max-width: 200px;
         max-height: 200px;
       }
+
+      .changeSharingSection {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
     </style>
-    <script
-      src="https://cdn.jsdelivr.net/npm/hash-wasm@4.11.0/dist/argon2.umd.min.js"
-      integrity="sha256-o5Q2B3wQN6xf0+9YVQJt4W3ukKO/TyKRuYLgWlHNGwc="
-      crossorigin="anonymous"
-    ></script>
+    <script src="argon2.umd.min.js"></script>
     <script>
       const WORLD_GROUP_ID = 1;
       const WORLD_GROUP_KEY = new Uint8Array([
@@ -325,6 +331,19 @@
               fetchAndMakeItem(selectedGrouping, item)
             );
 
+            const defaultOption = document.createElement("option");
+            defaultOption.value = "";
+            defaultOption.text = "select an item";
+            const itemOptions = items.map((item) => {
+              const option = document.createElement("option");
+              option.value = item.id;
+              option.text = `item ${item.id}`;
+              return option;
+            });
+            document
+              .getElementById("itemDropdown")
+              .replaceChildren(defaultOption, ...itemOptions);
+
             // Wait for all fetchAndMakeItem promises to resolve
             const divs = await Promise.all(fetchPromises);
             const itemsGrid = document.getElementById("itemsGrid");
@@ -446,6 +465,78 @@
       }
     </script>
     <script>
+      async function selectItem() {
+        const itemDropdown = document.getElementById("itemDropdown");
+        const selectedItem = parseInt(itemDropdown.value);
+
+        const sharingsResponse = await fetch(`/get_sharings?item_id=${selectedItem}`);
+        const sharings = await sharingsResponse.json();
+        const options = window.groupMemberships
+          .filter(
+            (membership) =>
+              !sharings.some((sharing) => sharing.group_id === membership.group.id)
+          )
+          .map((membership, index) => {
+            const option = document.createElement("option");
+            option.value = index;
+            option.text = membership.group.name;
+            return option;
+          });
+
+        const itemGroupDropdown = document.getElementById("itemGroupDropdown");
+        const defaultOption = document.createElement("option");
+        defaultOption.text = "select a group";
+        defaultOption.value = "";
+        itemGroupDropdown.replaceChildren(defaultOption, ...options);
+        itemGroupDropdown.disabled = false;
+      }
+
+      async function selectItemGroup() {
+        document.getElementById("shareItemButton").disabled = false;
+      }
+
+      async function shareItem() {
+        const itemsDropdown = document.getElementById("itemDropdown");
+        const itemsGroupDropdown = document.getElementById("itemGroupDropdown");
+
+        const selectedItem = parseInt(itemsDropdown.value);
+
+        const privateGrouping = window.groupMemberships.find(
+          (membership) => membership.group.private
+        ).grouping;
+        const privateGroupKey = await decryptGroupKey(privateGrouping);
+        const privateSharingResponse = await fetch(
+          `/get_sharing?item_id=${selectedItem}&group_id=${privateGrouping.group_id}`
+        );
+        const privateSharing = await privateSharingResponse.json();
+        const itemKey = await decryptItemKey(privateSharing, privateGroupKey);
+
+        const selectedGrouping =
+          window.groupMemberships[parseInt(itemsGroupDropdown.value)].grouping;
+        const newGroupKey = await decryptGroupKey(selectedGrouping);
+
+        const encryptedNewGroupKey = sodium.crypto_secretbox_easy(
+          itemKey,
+          deserializeBytes(privateSharing.encryption_key_nonce),
+          newGroupKey
+        );
+
+        // Send a POST request to share the item
+        const formData = new FormData();
+        formData.append("item_id", selectedItem);
+        formData.append("group_id", selectedGrouping.group_id);
+        formData.append("encryption_key", serializeBytes(encryptedNewGroupKey));
+        formData.append("encryption_key_nonce", privateSharing.encryption_key_nonce);
+        const createResponse = await sendFormData("/share_item", formData);
+
+        itemsDropdown.value = "";
+        itemsGroupDropdown.replaceChildren();
+        itemsGroupDropdown.disabled = true;
+        document.getElementById("shareItemButton").disabled = true;
+        await fetchAndDisplayItems();
+      }
+    </script>
+    <script>
       // global initialize
       window.sodium = {
         onload: (sodium) => (globalThis.sodium = sodium),
@@ -473,7 +564,7 @@
       <pre id="credentials" style="font-weight: bold"></pre>
       <button type="button" onclick="window.location.reload()">Logout</button>
 
-      <h1>Item and Group Creation</h1>
+      <h1>the glass files</h1>
 
       <form onsubmit="event.preventDefault(); encryptFileAndSubmit();">
         <h2>Create Item</h2>
@@ -501,6 +592,27 @@
         <label for="groupDropdown">Select a Group:</label>
         <select id="groupDropdown" onchange="fetchAndDisplayItems()"></select>
         <div id="itemsGrid"></div>
+      </div>
+
+      <hr />
+
+      <div>
+        <h2>Update item sharings</h2>
+
+        <div class="changeSharingSection">
+          <!-- First Dropdown with inline event handling -->
+          <select id="itemDropdown" onchange="selectItem()">
+            <option value="">select an item</option>
+          </select>
+
+          <!-- Second Dropdown (Disabled by default) -->
+          <select id="itemGroupDropdown" disabled onchange="selectItemGroup()"></select>
+
+          <!-- Button (Disabled by default) -->
+          <button id="shareItemButton" disabled onclick="shareItem()">
+            Share item with group
+          </button>
+        </div>
       </div>
     </div>
   </body>

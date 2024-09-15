@@ -10,7 +10,6 @@ readme = "README.md"
 dependencies = [
     "sqlalchemy[asyncio]>=2.0.32",
     "fastapi-slim>=0.112.2",
-    "jinja2>=3.1.4",
     "asyncpg>=0.29.0",
     "alembic>=1.13.2",
     "asyncio-atexit>=1.0.1",

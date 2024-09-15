@@ -2,7 +2,7 @@ import itertools
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import FastAPI, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import exists, func, select
@@ -247,13 +247,44 @@ async def get_sharing(item_id: int, group_id: int, session: SessionDependency):
         raise HTTPException(status.HTTP_403_FORBIDDEN) from None
 
 
-# class ShareOrUnshareFromGroupParams(BaseModel):
-#     new_user: int
-#     group_id: int
+@app.get("/get_sharings")
+async def get_sharings(item_id: int, session: SessionDependency):
+    # get all sharings for a single item.
+    sharing = await session.execute(select(Sharing).where(Sharing.item_id == item_id))
+    return sharing.scalars().all()
 
 
-# @app.post("/share_with_group")
-# async def share_with_group(params: ShareOrUnshareFromGroupParams): ...
+@app.post("/get_groupings")
+async def get_groupings(
+    user_id: Annotated[int, Query()], group_ids: list[int], session: SessionDependency
+):
+    # get all groupings for a single user against the known groups
+    groupings = await session.execute(
+        select(Grouping).where(
+            Grouping.user_id == user_id, Grouping.group_id.in_(group_ids)
+        )
+    )
+    ## ideally we'd ensure len(groupings) == len(group_ids) for security
+    return groupings.scalars().all()
+
+
+@app.post("/share_with_group")
+async def share_with_group(
+    item_id: Annotated[int, Form()],
+    group_id: Annotated[int, Form()],
+    encryption_key: EncodedBytes,
+    encryption_key_nonce: EncodedBytes,
+    session: SessionDependency,
+):
+    session.add(
+        Sharing(
+            item_id=item_id,
+            group_id=group_id,
+            encryption_key=encryption_key,
+            encryption_key_nonce=encryption_key_nonce,
+        )
+    )
+    await session.commit()
 
 
 # @app.post("/unshare_with_group")

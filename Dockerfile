@@ -1,4 +1,4 @@
-FROM python:3.12-slim AS pdm-venv
+FROM python:3.12-alpine AS pdm-venv
 
 ENV PDM_CHECK_UPDATE=false
 RUN pip install -U pdm
@@ -7,7 +7,7 @@ COPY pyproject.toml pdm.lock /
 RUN pdm install --check --prod --no-editable
 
 # run stage
-FROM python:3.12-slim
+FROM python:3.12-alpine
 
 ENV PATH="/.venv/bin:$PATH"
 ENV PYTHONPATH="/poc"
