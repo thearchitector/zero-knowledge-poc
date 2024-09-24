@@ -199,17 +199,35 @@
       }
     </script>
     <script>
-      async function sendFormData(url, formData) {
+      async function sendFormData(url, formData, method = "POST") {
         try {
           // Send the FormData to the server using async/await
           const response = await fetch(url, {
-            method: "POST",
+            method: method,
             body: formData,
           });
 
           if (!response.ok) {
             throw new Error(`${url} HTTP error! status: ${response.status}`);
           }
+
+          alert(`${url} success!`);
+          return response;
+        } catch (error) {
+          console.error(`${url} error:`, error);
+          alert(`${url} error.`);
+        }
+      }
+
+      async function sendJSONData(url, data, method = "POST") {
+        try {
+          const response = await fetch(url, {
+            method: method,
+            body: JSON.stringify(data),
+            headers: {
+              "Content-Type": "application/json",
+            },
+          });
 
           alert(`${url} success!`);
           return response;
@@ -245,6 +263,9 @@
           alert("Please choose a file.");
           return;
         }
+        const content = await fileInput.files[0].bytes();
+        const { contentKey, contentNonce, encryptedContent } =
+          await encryptFileContents(content);
 
         // decrypt the group key from the grouping using the user's private key.
         // assuming here that the first grouping returned is the one associated with
@@ -253,28 +274,15 @@
           (membership) => membership.group.private
         );
         const groupKey = await decryptGroupKey(privateGroup.grouping);
-        // generate a new symmetric content encryption key and nonce
-        const contentKey = sodium.crypto_secretbox_keygen();
         const keyEncryptionNonce = sodium.randombytes_buf(
           sodium.crypto_secretbox_NONCEBYTES
         );
-
         // encrypt the content encryption key using the user's group's key
         // groupKey is also an instance of a secretbox key
         const encryptedContentKey = sodium.crypto_secretbox_easy(
           contentKey,
           keyEncryptionNonce,
           groupKey
-        );
-
-        const file = fileInput.files[0];
-
-        const contentNonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
-        // Encrypt the file content using the symmetric key and the generated nonce
-        const encryptedFileContent = sodium.crypto_secretbox_easy(
-          await file.bytes(),
-          contentNonce,
-          contentKey
         );
 
         // Prepare the FormData payload
@@ -284,11 +292,30 @@
         formData.append("encryption_key_nonce", serializeBytes(keyEncryptionNonce));
         formData.append(
           "content",
-          new Blob([encryptedFileContent], { type: "application/octet-stream" })
+          new Blob([encryptedContent], { type: "application/octet-stream" })
         );
         formData.append("content_nonce", serializeBytes(contentNonce));
         await sendFormData("/create_item", formData);
         await fetchAndDisplayItems();
+      }
+
+      async function encryptFileContents(content) {
+        // generate a new symmetric content encryption key and nonce
+        const contentKey = sodium.crypto_secretbox_keygen();
+        const contentNonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+
+        // Encrypt the file content using the symmetric key and the generated nonce
+        const encryptedContent = sodium.crypto_secretbox_easy(
+          content,
+          contentNonce,
+          contentKey
+        );
+
+        return {
+          contentKey: contentKey,
+          contentNonce: contentNonce,
+          encryptedContent: encryptedContent,
+        };
       }
     </script>
     <script>
@@ -299,12 +326,13 @@
             const memberships = await response.json();
             const dropdown = document.getElementById("groupDropdown");
 
-            memberships.forEach((membership, index) => {
+            const groups = memberships.map((membership, index) => {
               const option = document.createElement("option");
               option.value = index;
               option.text = membership.group.name;
-              dropdown.add(option);
+              return option;
             });
+            dropdown.replaceChildren(...groups);
 
             window.groupMemberships = memberships;
           } else {
@@ -343,6 +371,8 @@
             document
               .getElementById("itemDropdown")
               .replaceChildren(defaultOption, ...itemOptions);
+            document.getElementById("adjustSharingButton").disabled = true;
+            document.getElementById("itemGroupDropdown").disabled = true;
 
             // Wait for all fetchAndMakeItem promises to resolve
             const divs = await Promise.all(fetchPromises);
@@ -469,13 +499,8 @@
         const itemDropdown = document.getElementById("itemDropdown");
         const selectedItem = parseInt(itemDropdown.value);
 
-        const sharingsResponse = await fetch(`/get_sharings?item_id=${selectedItem}`);
-        const sharings = await sharingsResponse.json();
         const options = window.groupMemberships
-          .filter(
-            (membership) =>
-              !sharings.some((sharing) => sharing.group_id === membership.group.id)
-          )
+          .filter((membership) => !membership.group.private)
           .map((membership, index) => {
             const option = document.createElement("option");
             option.value = index;
@@ -492,15 +517,50 @@
       }
 
       async function selectItemGroup() {
-        document.getElementById("shareItemButton").disabled = false;
+        const itemDropdown = document.getElementById("itemDropdown");
+        const selectedItem = parseInt(itemDropdown.value);
+
+        const itemsGroupDropdown = document.getElementById("itemGroupDropdown");
+        const selectedGrouping =
+          window.groupMemberships[parseInt(itemsGroupDropdown.value)].grouping;
+
+        const sharingsResponse = await fetch(`/get_sharings?item_id=${selectedItem}`);
+        const sharings = await sharingsResponse.json();
+
+        const button = document.getElementById("adjustSharingButton");
+        const isSharing = !sharings.some(
+          (sharing) => sharing.group_id === selectedGrouping.group_id
+        );
+        if (isSharing) button.dataset.isSharing = "true";
+        button.innerText = `${isSharing ? "Share" : "Unshare"} item with group`;
+        button.disabled = false;
       }
 
-      async function shareItem() {
+      async function adjustItemSharing() {
         const itemsDropdown = document.getElementById("itemDropdown");
         const itemsGroupDropdown = document.getElementById("itemGroupDropdown");
 
         const selectedItem = parseInt(itemsDropdown.value);
+        const selectedGrouping =
+          window.groupMemberships[parseInt(itemsGroupDropdown.value)].grouping;
 
+        const button = document.getElementById("adjustSharingButton");
+        if (button.dataset.isSharing === "true") {
+          await shareItem(selectedItem, selectedGrouping);
+        } else {
+          await unshareItem(selectedItem, selectedGrouping);
+        }
+
+        itemsDropdown.value = "";
+        itemsGroupDropdown.replaceChildren();
+        itemsGroupDropdown.disabled = true;
+        button.disabled = true;
+        delete button.dataset.isSharing;
+        button.innerText = "...";
+        await fetchAndDisplayItems();
+      }
+
+      async function shareItem(selectedItem, selectedGrouping) {
         const privateGrouping = window.groupMemberships.find(
           (membership) => membership.group.private
         ).grouping;
@@ -511,10 +571,7 @@
         const privateSharing = await privateSharingResponse.json();
         const itemKey = await decryptItemKey(privateSharing, privateGroupKey);
 
-        const selectedGrouping =
-          window.groupMemberships[parseInt(itemsGroupDropdown.value)].grouping;
         const newGroupKey = await decryptGroupKey(selectedGrouping);
-
         const encryptedNewGroupKey = sodium.crypto_secretbox_easy(
           itemKey,
           deserializeBytes(privateSharing.encryption_key_nonce),
@@ -527,13 +584,83 @@
         formData.append("group_id", selectedGrouping.group_id);
         formData.append("encryption_key", serializeBytes(encryptedNewGroupKey));
         formData.append("encryption_key_nonce", privateSharing.encryption_key_nonce);
-        const createResponse = await sendFormData("/share_item", formData);
+        await sendFormData("/share_with_group", formData);
+      }
 
-        itemsDropdown.value = "";
-        itemsGroupDropdown.replaceChildren();
-        itemsGroupDropdown.disabled = true;
-        document.getElementById("shareItemButton").disabled = true;
-        await fetchAndDisplayItems();
+      async function unshareItem(selectedItem, selectedGrouping) {
+        // download and decrypt the item
+        const itemResponse = await fetch(`/get_item?item_id=${selectedItem}`);
+        const item = await itemResponse.json();
+        const itemContentResponse = await fetch(`/view_item?item_id=${selectedItem}`);
+        const encryptedFileContent = await streamResponse(itemContentResponse);
+        const fileContent = await decryptFile(
+          encryptedFileContent,
+          item.content_nonce,
+          selectedGrouping,
+          selectedItem
+        );
+
+        // reencrypt the item with a new key and nonce
+        const { contentKey, contentNonce, encryptedContent } =
+          await encryptFileContents(fileContent);
+
+        // delete the sharing between the item and group (revoke current access)
+        await sendJSONData(
+          "/unshare_from_group",
+          {
+            item_id: selectedItem,
+            group_id: selectedGrouping.group_id,
+          },
+          "DELETE"
+        );
+
+        // get remaining sharings
+        const sharingsResponse = await fetch(`/get_sharings?item_id=${selectedItem}`);
+        const sharings = await sharingsResponse.json();
+
+        // get every implicated grouping
+        const implicatedGroups = sharings.map((sharing) => sharing.group_id);
+        const groupingsResponse = await sendJSONData("/get_groupings", {
+          user_id: window.userId,
+          group_ids: implicatedGroups,
+        });
+        const groupingsMapping = await groupingsResponse.json();
+
+        // update the sharings (ensure access for remaining groups)
+        const sharingsUpdates = sharings.map(async (sharing) => {
+          const grouping = groupingsMapping[sharing.group_id];
+          const groupKey = await decryptGroupKey(grouping);
+
+          const keyEncryptionNonce = sodium.randombytes_buf(
+            sodium.crypto_secretbox_NONCEBYTES
+          );
+          // encrypt the content encryption key using the user's group's key
+          // groupKey is also an instance of a secretbox key
+          const encryptedContentKey = sodium.crypto_secretbox_easy(
+            contentKey,
+            keyEncryptionNonce,
+            groupKey
+          );
+
+          const formData = new FormData();
+          formData.append("item_id", selectedItem);
+          formData.append("group_id", sharing.group_id);
+          formData.append("encryption_key", serializeBytes(encryptedContentKey));
+          formData.append("encryption_key_nonce", serializeBytes(keyEncryptionNonce));
+          await sendFormData("/update_sharing", formData, "PATCH");
+        });
+        await Promise.all(sharingsUpdates);
+
+        // update the item
+        // (ensure access for groups and revoke past/future access for revoked group)
+        const formData = new FormData();
+        formData.append("item_id", selectedItem);
+        formData.append("content_nonce", serializeBytes(contentNonce));
+        formData.append(
+          "content",
+          new Blob([encryptedContent], { type: "application/octet-stream" })
+        );
+        await sendFormData("/update_item", formData, "PATCH");
       }
     </script>
     <script>
@@ -598,19 +725,18 @@
 
       <div>
         <h2>Update item sharings</h2>
+        <h3>Share item</h3>
 
         <div class="changeSharingSection">
           <!-- First Dropdown with inline event handling -->
-          <select id="itemDropdown" onchange="selectItem()">
-            <option value="">select an item</option>
-          </select>
+          <select id="itemDropdown" onchange="selectItem()"></select>
 
           <!-- Second Dropdown (Disabled by default) -->
           <select id="itemGroupDropdown" disabled onchange="selectItemGroup()"></select>
 
           <!-- Button (Disabled by default) -->
-          <button id="shareItemButton" disabled onclick="shareItem()">
-            Share item with group
+          <button id="adjustSharingButton" disabled onclick="adjustItemSharing()">
+            ...
           </button>
         </div>
       </div>

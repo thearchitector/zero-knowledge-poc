@@ -12,6 +12,7 @@ services:
     build: .
     volumes:
       - ./:/poc
+      - /poc/.venv
     ports:
       - 3000:3000
     command: --reload --reload-dir poc --reload-include poc/*.py

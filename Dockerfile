@@ -22,6 +22,5 @@ WORKDIR /poc
 COPY --from=pdm-venv /.venv/ /.venv
 COPY . /poc
 
-
 ENTRYPOINT [ "/poc/bin/entrypoint.sh" ]
 CMD [ "--proxy-headers" ]

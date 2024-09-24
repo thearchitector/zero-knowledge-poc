@@ -1,11 +1,13 @@
 import itertools
 from contextlib import asynccontextmanager
+from os import scandir
 from typing import Annotated
 
-from fastapi import FastAPI, Form, HTTPException, Query, UploadFile, status
+from fastapi import FastAPI, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import exists, func, select
+from pydantic import BaseModel
+from sqlalchemy import delete, func, select
 
 from .db import SessionDependency, create_session
 from .models import Group, Grouping, Item, Sharing, User
@@ -35,6 +37,7 @@ EncodedBytes = Annotated[str, Form()]
 ##
 
 
+#### create
 @app.post("/create_user")
 async def create_user(
     email: Annotated[str, Form()],
@@ -54,6 +57,7 @@ async def create_user(
     return u
 
 
+#### read
 @app.get("/get_user")
 async def get_user(email: str, session: SessionDependency):
     # get user by id
@@ -64,6 +68,7 @@ async def get_user(email: str, session: SessionDependency):
         raise HTTPException(status.HTTP_403_FORBIDDEN) from None
 
 
+#### read
 @app.get("/get_users")
 async def get_users(session: SessionDependency):
     # DEBUG ONLY
@@ -76,6 +81,7 @@ async def get_users(session: SessionDependency):
 ##
 
 
+#### create
 @app.post("/create_item")
 async def create_item(
     owner_user_id: Annotated[int, Form()],
@@ -111,6 +117,7 @@ async def create_item(
     return await i.awaitable_attrs.id
 
 
+#### read
 @app.get("/get_items")
 async def get_items(session: SessionDependency):
     # get all item ids
@@ -121,6 +128,15 @@ async def get_items(session: SessionDependency):
     ]
 
 
+#### read
+@app.get("/get_item")
+async def get_item(item_id: int, session: SessionDependency):
+    # get item by id
+    item = await session.get(Item, item_id)
+    return {"id": item.id, "content_nonce": item.content_nonce}
+
+
+#### read
 @app.get("/view_item")
 async def view_item(item_id: int, session: SessionDependency):
     # streaming return item content as bytes to avoid massive payloads
@@ -134,12 +150,18 @@ async def view_item(item_id: int, session: SessionDependency):
     return StreamingResponse(item_chunks())
 
 
-# class UpdateItemParams(BaseModel):
-#     content: RawBytes
-
-
-# @app.post("/update_item")
-# async def update_item(params: UpdateItemParams): ...
+@app.patch("/update_item")
+async def update_item(
+    item_id: Annotated[int, Form()],
+    content_nonce: EncodedBytes,
+    content: UploadFile,
+    session: SessionDependency,
+):
+    item = await session.get(Item, item_id)
+    item.content = await content.read()
+    item.content_nonce = content_nonce
+    session.add(item)
+    await session.commit()
 
 
 ##
@@ -179,6 +201,10 @@ async def create_group(
     return g
 
 
+### GROUPINGS
+
+
+#### create
 @app.post("/invite_to_group")
 async def invite_to_group(
     invitee_id: Annotated[int, Form()],
@@ -196,21 +222,7 @@ async def invite_to_group(
     return grouping
 
 
-# class RemoveFromGroupParams(BaseModel):
-#     user_id: int
-#     group_id: int
-
-
-# @app.post("/remove_from_group")
-# async def remove_from_group(params: RemoveFromGroupParams, session: SessionDependency):
-#     # delete a grouping
-#     await session.execute(
-#         delete(Grouping).where(
-#             Grouping.user_id == params.user_id, Grouping.group_id == params.group_id
-#         )
-#     )
-
-
+#### read
 @app.get("/get_memberships")
 async def get_memberships(user_id: int, session: SessionDependency):
     # get groupings for a single user
@@ -233,41 +245,42 @@ async def get_memberships(user_id: int, session: SessionDependency):
     ]
 
 
-@app.get("/get_sharing")
-async def get_sharing(item_id: int, group_id: int, session: SessionDependency):
-    # get sharing for a single user and a single items
-    sharing = await session.execute(
-        select(Sharing)
-        .where(Sharing.group_id == group_id, Sharing.item_id == item_id)
-        .limit(1)
-    )
-    try:
-        return sharing.scalar_one()
-    except Exception:
-        raise HTTPException(status.HTTP_403_FORBIDDEN) from None
+class GetGroupingsParams(BaseModel):
+    user_id: int
+    group_ids: list[int]
 
 
-@app.get("/get_sharings")
-async def get_sharings(item_id: int, session: SessionDependency):
-    # get all sharings for a single item.
-    sharing = await session.execute(select(Sharing).where(Sharing.item_id == item_id))
-    return sharing.scalars().all()
-
-
+#### read
 @app.post("/get_groupings")
-async def get_groupings(
-    user_id: Annotated[int, Query()], group_ids: list[int], session: SessionDependency
-):
+async def get_groupings(params: GetGroupingsParams, session: SessionDependency):
     # get all groupings for a single user against the known groups
     groupings = await session.execute(
         select(Grouping).where(
-            Grouping.user_id == user_id, Grouping.group_id.in_(group_ids)
+            Grouping.user_id == params.user_id, Grouping.group_id.in_(params.group_ids)
         )
     )
     ## ideally we'd ensure len(groupings) == len(group_ids) for security
-    return groupings.scalars().all()
+    return {grouping.group_id: grouping for grouping in groupings.scalars().all()}
 
 
+# class RemoveFromGroupParams(BaseModel):
+#     user_id: int
+#     group_id: int
+
+
+# @app.post("/remove_from_group")
+# async def remove_from_group(params: RemoveFromGroupParams, session: SessionDependency):
+#     # delete a grouping
+#     await session.execute(
+#         delete(Grouping).where(
+#             Grouping.user_id == params.user_id, Grouping.group_id == params.group_id
+#         )
+#     )
+
+### SHARINGS
+
+
+#### create
 @app.post("/share_with_group")
 async def share_with_group(
     item_id: Annotated[int, Form()],
@@ -287,8 +300,66 @@ async def share_with_group(
     await session.commit()
 
 
-# @app.post("/unshare_with_group")
-# async def unshare_with_group(params: ShareOrUnshareFromGroupParams): ...
+#### read
+@app.get("/get_sharings")
+async def get_sharings(item_id: int, session: SessionDependency):
+    # get all sharings for a single item.
+    sharing = await session.execute(select(Sharing).where(Sharing.item_id == item_id))
+    return sharing.scalars().all()
+
+
+#### read
+@app.get("/get_sharing")
+async def get_sharing(item_id: int, group_id: int, session: SessionDependency):
+    # get sharing for a single user and a single items
+    sharing = await session.execute(
+        select(Sharing)
+        .where(Sharing.group_id == group_id, Sharing.item_id == item_id)
+        .limit(1)
+    )
+    try:
+        return sharing.scalar_one()
+    except Exception:
+        raise HTTPException(status.HTTP_403_FORBIDDEN) from None
+
+
+#### update
+@app.patch("/update_sharing")
+async def update_sharing(
+    item_id: Annotated[int, Form()],
+    group_id: Annotated[int, Form()],
+    encryption_key: EncodedBytes,
+    encryption_key_nonce: EncodedBytes,
+    session: SessionDependency,
+):
+    # get all sharings for a single item.
+    sharing = await session.execute(
+        select(Sharing).where(Sharing.item_id == item_id, Sharing.group_id == group_id)
+    )
+    sharing = sharing.scalar_one()
+    sharing.encryption_key = encryption_key
+    sharing.encryption_key_nonce = encryption_key_nonce
+    session.add(sharing)
+    await session.commit()
+
+
+class UnshareFromGroupParams(BaseModel):
+    item_id: int
+    group_id: int
+
+
+#### delete
+@app.delete("/unshare_from_group")
+async def unshare_from_group(
+    params: UnshareFromGroupParams, session: SessionDependency
+):
+    # delete the sharing between the item and the group
+    await session.execute(
+        delete(Sharing).where(
+            Sharing.item_id == params.item_id, Sharing.group_id == params.group_id
+        )
+    )
+    await session.commit()
 
 
 app.mount("/", StaticFiles(directory="ui", html=True), name="static")

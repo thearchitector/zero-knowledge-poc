@@ -11,6 +11,8 @@ the cryptographic model is higher fidelity / (nearly) production ready.
 - users can see items shared with groups they're in
 - users cannot see items shared with groups they're not in
 - server can never see the item data, or any other private data, its encrypted
+- users can share and unshare items from groups
+  - after unsharing an item from a group, users in that group cannot view the item _even if_ they took note of the cryptographic keys used at the time of the initial viewing (forward secrecy)
 
 copyright 2024 elias gabriel. not for redistribution or modification. all rights reserved.
 
@@ -20,7 +22,7 @@ docker compose project. just `docker compose up --build` and go to `localhost:30
 
 ## explanation
 
-the fundamental principle here is that items are encrypted before upload, and that groups facilitate access to said items' encryption keys. items own their own data, so permission / authorization changes never necessitate re-encryption. access can be controlled entirely through the existence of individual "sharings" and "groupings".
+the fundamental principle here is that items are encrypted before upload, and that groups facilitate access to said items' encryption keys. items own their own data, so **additive** permission / authorization changes never necessitate re-encryption. access can be controlled entirely through the existence of individual "sharings" and "groupings".
 
 <https://drive.google.com/file/d/1gSnLa0OlCV8gfHS4aRuWzdc2bIdGrZXo/view?usp=sharing>
 
@@ -63,12 +65,6 @@ no sensitive information leaves the user's device. the only things transmitted t
 -----
 
 there are 2 users in the demo. user 1 created an item and it is shared with their personal group. user 2 created an item and it is shared with their personal group. user 1 can switch to their group and see the item they created, but cannot see the other item because they're not a part of user 2's private group (and therefore cannot get access to the sharing). vice versa for user 2 and their item.
-
------
-
-not in the demo, but in principle inviting a user to a group only needs to consist of creating a "grouping" for them. sharing an item with a group only consists of creating a "sharing" for it. manipulation of users and groups, and items and groups, are fairly inexpensive. groups are the proxy.
-
-to remove an item from a group, just delete the sharing. to remove a user from a group, just delete the grouping. fast operations, and nothing needs to decrypted & reencrypted on the fly.
 ```
 
 </details>
