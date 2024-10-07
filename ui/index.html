@@ -238,7 +238,7 @@
       }
     </script>
     <script>
-      async function decryptGroupKey(grouping) {
+      function decryptGroupKey(grouping) {
         /**
          * decrypt the group's key using the user's private key and the encrypted
          * key available on their grouping
@@ -265,7 +265,7 @@
         }
         const content = await fileInput.files[0].bytes();
         const { contentKey, contentNonce, encryptedContent } =
-          await encryptFileContents(content);
+          encryptFileContents(content);
 
         // decrypt the group key from the grouping using the user's private key.
         // assuming here that the first grouping returned is the one associated with
@@ -273,7 +273,7 @@
         const privateGroup = window.groupMemberships.find(
           (membership) => membership.group.private
         );
-        const groupKey = await decryptGroupKey(privateGroup.grouping);
+        const groupKey = decryptGroupKey(privateGroup.grouping);
         const keyEncryptionNonce = sodium.randombytes_buf(
           sodium.crypto_secretbox_NONCEBYTES
         );
@@ -299,7 +299,7 @@
         await fetchAndDisplayItems();
       }
 
-      async function encryptFileContents(content) {
+      function encryptFileContents(content) {
         // generate a new symmetric content encryption key and nonce
         const contentKey = sodium.crypto_secretbox_keygen();
         const contentNonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
@@ -465,8 +465,8 @@
         );
         if (sharingResponse.status != 200) return null;
         const sharing = await sharingResponse.json();
-        const groupKey = await decryptGroupKey(selectedGrouping);
-        const itemKey = await decryptItemKey(sharing, groupKey);
+        const groupKey = decryptGroupKey(selectedGrouping);
+        const itemKey = decryptItemKey(sharing, groupKey);
 
         const contentNonce = deserializeBytes(encodedContentNonce);
         const fileContent = sodium.crypto_secretbox_open_easy(
@@ -480,7 +480,7 @@
         // }
       }
 
-      async function decryptItemKey(sharing, groupKey) {
+      function decryptItemKey(sharing, groupKey) {
         /**
          * decrypt the item's private key from the sharing using the group's key
          **/
@@ -495,7 +495,7 @@
       }
     </script>
     <script>
-      async function selectItem() {
+      function selectItem() {
         const itemDropdown = document.getElementById("itemDropdown");
         const selectedItem = parseInt(itemDropdown.value);
 
@@ -564,14 +564,14 @@
         const privateGrouping = window.groupMemberships.find(
           (membership) => membership.group.private
         ).grouping;
-        const privateGroupKey = await decryptGroupKey(privateGrouping);
+        const privateGroupKey = decryptGroupKey(privateGrouping);
         const privateSharingResponse = await fetch(
           `/get_sharing?item_id=${selectedItem}&group_id=${privateGrouping.group_id}`
         );
         const privateSharing = await privateSharingResponse.json();
-        const itemKey = await decryptItemKey(privateSharing, privateGroupKey);
+        const itemKey = decryptItemKey(privateSharing, privateGroupKey);
 
-        const newGroupKey = await decryptGroupKey(selectedGrouping);
+        const newGroupKey = decryptGroupKey(selectedGrouping);
         const encryptedNewGroupKey = sodium.crypto_secretbox_easy(
           itemKey,
           deserializeBytes(privateSharing.encryption_key_nonce),
@@ -602,7 +602,7 @@
 
         // reencrypt the item with a new key and nonce
         const { contentKey, contentNonce, encryptedContent } =
-          await encryptFileContents(fileContent);
+          encryptFileContents(fileContent);
 
         // delete the sharing between the item and group (revoke current access)
         await sendJSONData(
@@ -629,7 +629,7 @@
         // update the sharings (ensure access for remaining groups)
         const sharingsUpdates = sharings.map(async (sharing) => {
           const grouping = groupingsMapping[sharing.group_id];
-          const groupKey = await decryptGroupKey(grouping);
+          const groupKey = decryptGroupKey(grouping);
 
           const keyEncryptionNonce = sodium.randombytes_buf(
             sodium.crypto_secretbox_NONCEBYTES
@@ -666,7 +666,10 @@
     <script>
       // global initialize
       window.sodium = {
-        onload: (sodium) => (globalThis.sodium = sodium),
+        onload: (sodium) => {
+          globalThis.sodium = sodium;
+          document.getElementById("loginButton").disabled = false;
+        },
       };
     </script>
     <script src="sodium.js"></script>
@@ -682,7 +685,7 @@
         <label for="loginPassword">Password:</label>
         <input type="password" id="loginPassword" required />
         <br /><br />
-        <button type="submit">Login / Create Account</button>
+        <button id="loginButton" type="submit" disabled>Login / Create Account</button>
       </form>
     </div>
 
